@@ -2,15 +2,20 @@
 {-# CONTENT_TYPE DAPP #-}
 {-# SCRIPT_TYPE ACCOUNT #-}
 
-let VERSION = "Long-0.0.1"
+let VERSION = "Long-0.0.2"
 
 let Scale16 = 10000000000000000
+let Scale8 = 100000000
 
+let OracleAddress = getString(this, "setup_address_oracle").valueOrElse("").addressFromString().valueOrElse(Address(base58'3P8d1E1BLKoD52y3bQJ1bDTd2TD1gpaLn9t'))
+let PoolAddress = Address(base58'3PNfEcECsaLXFcSLcf6bTxyZ5XLHLpisNFg')
 let market = Address(base58'3P8Df2b7ywHtLBHBe8PBVQYd3A5MdEEJAou')
 let supplyTokenStr = "WAVES"
 let supplyToken = unit
+let supplyTokenScale = 100000000
 let borrowTokenStr = "AP4Cb5xLYGH6ZigHreCZHoXpQTWDkPsG2BHqfDUx6taJ"
 let borrowToken = base58'AP4Cb5xLYGH6ZigHreCZHoXpQTWDkPsG2BHqfDUx6taJ'
+let borrowTokenScale = 1000000
 let lpIdStr = getString(this, "setup_lpid").valueOrElse("")
 let lpId = lpIdStr.fromBase58String()
 
@@ -55,81 +60,88 @@ func getBalance(assetIdStr: String) = {
 ## actions
 
 func swapBorrowed(borrowedAmount: Int) = {
-  let poolAddress = Address(base58'')
-  invoke(poolAddress, "swap", [supplyTokenStr, 0], [AttachedPayment(borrowToken, borrowedAmount)])
+  invoke(PoolAddress, "swap", [supplyTokenStr, 0], [AttachedPayment(borrowToken, borrowedAmount)])
+}
+
+func calcRealPrice(amountIn: Int) = {
+  strict amountOut = invoke(PoolAddress, "swapReadOnly", [borrowTokenStr, supplyTokenStr, amountIn], []).exactAs[Int]
+  fraction(amountIn, supplyTokenScale, amountOut)
 }
 
 ## callables
 
 @Callable(i)
-func init() = {
-  if (i.caller != this) then {throw("self invoke only")}
-  else if (getString("setup_lpid") != unit) then {throw("already initialized")}
+func init(toBorrow: Int) = {
+  if (i.caller != Address(base58'3P9xX849YJXg7C87v82cDyDy5VhKiPJpHo8')) then {throw("whitelist only")}
+  # if (lpIdStr != "") then {throw("already initialized")}
   else {
-    let issue = Issue("#WAVESLONG", "#WAVESLONG", 0, 8, true)
+    let pmt = i.payments[0]
+    strict assetValidity = if (pmt.assetId.getAssetString() != supplyTokenStr) then {throw("wrong asset attached")} else true
+
+    strict supply = invoke(market, "supply", [], [pmt])
+    strict borrow = invoke(market, "borrow", [borrowTokenStr, toBorrow], [])
+
+    let issue = Issue("#WAVESLONG", "#WAVESLONG", pmt.amount, 8, true)
     [
       StringEntry("setup_lpid", issue.calculateAssetId().getAssetString()),
-      issue
+      issue,
+      ScriptTransfer(i.caller, pmt.amount, issue.calculateAssetId())
     ]
   }
 }
 
 @Callable(i)
-func getSupplyAndBorrow(toSupply: Int) = {
-    strict rates = getRates()
-    strict supply = getCurrentSupply(rates)
-    strict borrow = getCurrentBorrow(rates)
-    strict toBorrow = fraction(toSupply, borrow, supply)
-
-    throw(supply.toString() + ", " + borrow.toString() + ", " + toSupply.toString() + ", " + toBorrow.toString())
-}
-
-@Callable(i)
-func mintINTERNAL(amountIn: Int) = {
-  if (i.caller != this) then {throw("only available for self invoke")}
-  else {
-    strict rates = getRates()
-    strict supply = getCurrentSupply(rates)
-    strict borrow = getCurrentBorrow(rates)
-
-    strict toSupply = amountIn
-    strict toBorrow = fraction(toSupply, borrow, supply)
-
-    strict inv1 = invoke(market, "supply", [], [i.payments[0]])
-    strict borBalBefore = getBalance(borrowTokenStr)
-    strict inv2 = invoke(market, "borrow", [borrowTokenStr, toBorrow], [])
-    strict borrowedAmount = borBalBefore - getBalance(borrowTokenStr)
-    # to think about: the borrowing rounding slightly changes supply/borrow ratio every time
-
-    let lpAmount = fraction(assetInfo(lpId).value().quantity, toSupply, supply)
-    let reissue = Reissue(lpId, lpAmount, true)
-
-    ([reissue], (lpAmount, borrowedAmount))
-  }
-}
-
-@Callable(i)
-func mint(swapAfter: Boolean) = {
+func mintWithLeverage(minPrice: Int, readOnly: Boolean) = {
   let pmt = i.payments[0]
 
-  if (pmt.assetId.getAssetString() != supplyTokenStr) then {throw("attach supply token as payment")}
+  strict assetValidity = if (pmt.assetId.getAssetString() != supplyTokenStr) then {throw("wrong asset attached")} else true
+
+  let sAssetPrice = getIntegerValue(OracleAddress, supplyTokenStr+"_twap5B")
+  let pmtUsd = fraction(pmt.amount, sAssetPrice, supplyTokenScale)
+  let marketRates = getRates()
+  let positionSupply = getCurrentSupply(marketRates)
+  let positionBorrow = getCurrentBorrow(marketRates)
+  let borSupRatio = fraction(Scale8, positionBorrow, positionSupply)
+  let positionUsd = fraction(positionSupply, sAssetPrice, supplyTokenScale) - positionBorrow
+
+  let shareInPosition = fraction(pmtUsd, Scale8, positionUsd)
+  let usdToBorrowWithoutSlippage = fraction(shareInPosition, Scale8, positionBorrow)
+  let priceWithSlippage = calcRealPrice(usdToBorrowWithoutSlippage)
+
+  strict priceCheck = if (priceWithSlippage < minPrice) then {throw("leverage price is less than minPrice -> try smaller amount")} else true
+
+  # non-priority TODO: this is a rough calculation, ideally to calc perfect amount of usdToBorrow based on slippage curve
+  let toBorrow = fraction(usdToBorrowWithoutSlippage, priceWithSlippage, sAssetPrice)
+
+  strict supBalBefore1 = getBalance(supplyTokenStr)
+  strict inv1 = invoke(market, "supply", [], [i.payments[0]])
+  strict suppliedFirst = getBalance(supplyTokenStr) - supBalBefore1
+  strict borBalBefore = getBalance(borrowTokenStr)
+  strict inv2 = invoke(market, "borrow", [borrowTokenStr, toBorrow], [])
+  strict borrowedAmount = getBalance(borrowTokenStr) - borBalBefore
+  strict supBalBefore2 = getBalance(supplyTokenStr)
+  strict inv3 = swapBorrowed(borrowedAmount)
+  strict boughtAmount = getBalance(supplyTokenStr) - supBalBefore2
+
+  # add to supply = borrowedAmount / borSupRatio - suppliedFirst
+  let toSupply = fraction(borrowedAmount, Scale8, borSupRatio)
+  let addToSupply = toSupply - suppliedFirst
+  let sendBack = boughtAmount - addToSupply
+  strict inv4 = invoke(market, "supply", [], [AttachedPayment(supplyToken, addToSupply)])
+
+  strict enoughSwappedCheck = if (sendBack < 0) then {throw("something went wrong while leverage calculation -> use other minting options")} else true
+
+  # TODO: final checks that borrow and supply of position increased proportionally
+
+  let lpAmount = fraction(assetInfo(lpId).value().quantity, toSupply, positionSupply)
+
+  if (readOnly) then {throw("minted: " + lpAmount.toString() + " LONG, sent back: " + sendBack.toString() + " WAVES")}
   else {
-    strict (lpAmount, borrowedAmount) = invoke(this, "mintINTERNAL", [], []).exactAs[(Int, Int)]
-
-    if (!swapAfter) then {
-      [
-        ScriptTransfer(i.caller, lpAmount, lpId),
-        ScriptTransfer(i.caller, borrowedAmount, borrowTokenStr.getAssetBytes())
-      ]
-    } else {
-      strict balBefore = getBalance(supplyTokenStr)
-      strict swapResult = swapBorrowed(borrowedAmount)
-      strict bought = getBalance(supplyTokenStr) - balBefore
-
-      [
-      
-      ]
-    }
+    [
+      Reissue(lpId, lpAmount, true),
+      ScriptTransfer(i.caller, lpAmount, lpId),
+      ScriptTransfer(i.caller, sendBack, supplyToken)
+    ]
   }
 }
 
