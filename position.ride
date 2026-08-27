@@ -1,0 +1,164 @@
+{-# STDLIB_VERSION 6 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+let VERSION = "Long-0.0.1"
+
+let Scale16 = 10000000000000000
+
+let market = Address(base58'3P8Df2b7ywHtLBHBe8PBVQYd3A5MdEEJAou')
+let supplyTokenStr = "WAVES"
+let supplyToken = unit
+let borrowTokenStr = "AP4Cb5xLYGH6ZigHreCZHoXpQTWDkPsG2BHqfDUx6taJ"
+let borrowToken = base58'AP4Cb5xLYGH6ZigHreCZHoXpQTWDkPsG2BHqfDUx6taJ'
+let lpIdStr = getString(this, "setup_lpid").valueOrElse("")
+let lpId = lpIdStr.fromBase58String()
+
+func getAssetString(assetId: ByteVector|Unit) = {
+  match assetId {
+    case b:ByteVector => b.toBase58String()
+    case _ => "WAVES"
+  }
+}
+
+func getAssetBytes(assetIdStr: String) = {
+  if (assetIdStr == "WAVES") then {unit} else {assetIdStr.fromBase58String()}
+}
+
+func getRates() = {
+  strict rates = invoke(market, "calculateTokenRates", [false], [])
+  rates.exactAs[String]
+}
+
+func getRate(rates: String, assetStr: String, rateType: String) = {
+  strict rateNum = if rateType == "bRate" then 0 else 1
+  strict assetNum = getStringValue(market, "setup_tokens").split(",").indexOf(assetStr).value()
+  rates.split(",")[assetNum].value().split("|")[rateNum].parseIntValue()
+}
+
+func getCurrentSupply(rates: String) = {
+  strict supply = getIntegerValue(market, this.toString()+"_supplied_"+supplyTokenStr)
+  strict rate = getRate(rates, supplyTokenStr, "sRate")
+  fraction(supply, rate, Scale16)
+}
+
+func getCurrentBorrow(rates: String) = {
+  strict borrow = getIntegerValue(market, this.toString()+"_borrowed_"+borrowTokenStr)
+  strict rate = getRate(rates, borrowTokenStr, "bRate")
+  fraction(borrow, rate, Scale16)
+}
+
+func getBalance(assetIdStr: String) = {
+  if (assetIdStr == "WAVES") then {wavesBalance(this).available} else {assetBalance(this, assetIdStr.fromBase58String())}
+}
+
+## actions
+
+func swapBorrowed(borrowedAmount: Int) = {
+  let poolAddress = Address(base58'')
+  invoke(poolAddress, "swap", [supplyTokenStr, 0], [AttachedPayment(borrowToken, borrowedAmount)])
+}
+
+## callables
+
+@Callable(i)
+func init() = {
+  if (i.caller != this) then {throw("self invoke only")}
+  else if (getString("setup_lpid") != unit) then {throw("already initialized")}
+  else {
+    let issue = Issue("#WAVESLONG", "#WAVESLONG", 0, 8, true)
+    [
+      StringEntry("setup_lpid", issue.calculateAssetId().getAssetString()),
+      issue
+    ]
+  }
+}
+
+@Callable(i)
+func getSupplyAndBorrow(toSupply: Int) = {
+    strict rates = getRates()
+    strict supply = getCurrentSupply(rates)
+    strict borrow = getCurrentBorrow(rates)
+    strict toBorrow = fraction(toSupply, borrow, supply)
+
+    throw(supply.toString() + ", " + borrow.toString() + ", " + toSupply.toString() + ", " + toBorrow.toString())
+}
+
+@Callable(i)
+func mintINTERNAL(amountIn: Int) = {
+  if (i.caller != this) then {throw("only available for self invoke")}
+  else {
+    strict rates = getRates()
+    strict supply = getCurrentSupply(rates)
+    strict borrow = getCurrentBorrow(rates)
+
+    strict toSupply = amountIn
+    strict toBorrow = fraction(toSupply, borrow, supply)
+
+    strict inv1 = invoke(market, "supply", [], [i.payments[0]])
+    strict borBalBefore = getBalance(borrowTokenStr)
+    strict inv2 = invoke(market, "borrow", [borrowTokenStr, toBorrow], [])
+    strict borrowedAmount = borBalBefore - getBalance(borrowTokenStr)
+    # to think about: the borrowing rounding slightly changes supply/borrow ratio every time
+
+    let lpAmount = fraction(assetInfo(lpId).value().quantity, toSupply, supply)
+    let reissue = Reissue(lpId, lpAmount, true)
+
+    ([reissue], (lpAmount, borrowedAmount))
+  }
+}
+
+@Callable(i)
+func mint(swapAfter: Boolean) = {
+  let pmt = i.payments[0]
+
+  if (pmt.assetId.getAssetString() != supplyTokenStr) then {throw("attach supply token as payment")}
+  else {
+    strict (lpAmount, borrowedAmount) = invoke(this, "mintINTERNAL", [], []).exactAs[(Int, Int)]
+
+    if (!swapAfter) then {
+      [
+        ScriptTransfer(i.caller, lpAmount, lpId),
+        ScriptTransfer(i.caller, borrowedAmount, borrowTokenStr.getAssetBytes())
+      ]
+    } else {
+      strict balBefore = getBalance(supplyTokenStr)
+      strict swapResult = swapBorrowed(borrowedAmount)
+      strict bought = getBalance(supplyTokenStr) - balBefore
+
+      [
+      
+      ]
+    }
+  }
+}
+
+@Callable(i)
+func redeemV1() = {
+  let pmt1 = i.payments[0].value() # LP
+  let pmt2 = i.payments[1].value() # borrow
+
+  if (!(pmt1.assetId == lpId && pmt2.assetId.getAssetString() == borrowTokenStr)) then {throw("attach lp & borrow tokens as payment")}
+  else {
+    strict rates = getRates()
+    strict supply = getCurrentSupply(rates)
+    strict borrow = getCurrentBorrow(rates)
+
+    let borrowEquivalent = fraction(pmt1.amount, borrow, supply)
+    let borrowReturn = min([borrowEquivalent, pmt2.amount])
+
+    let usedLP = fraction(borrowReturn, supply, borrow)
+    let usedRepay = borrowReturn
+
+    strict inv1 = invoke(market, "repay", [], [AttachedPayment(borrowTokenStr.getAssetBytes(), usedRepay)])
+    strict inv2 = invoke(market, "withdraw", [supplyTokenStr, usedLP], [])
+
+    [
+      Burn(lpId, usedLP),
+
+      ScriptTransfer(i.caller, usedLP - 1, supplyTokenStr.getAssetBytes()),
+      ScriptTransfer(i.caller, pmt1.amount - usedLP, lpId),
+      ScriptTransfer(i.caller, pmt2.amount - usedRepay, borrowTokenStr.getAssetBytes())
+    ]
+  }
+} 
