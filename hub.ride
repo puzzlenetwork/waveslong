@@ -1,0 +1,89 @@
+{-# STDLIB_VERSION 6 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+let VERSION = "LongHub-0.1.0"
+
+let Scale16 = 10000000000000000
+let Scale8 = 100000000
+
+let OracleAddress = getString(this, "setup_address_oracle").valueOrElse("").addressFromString().valueOrElse(Address(base58'3P8d1E1BLKoD52y3bQJ1bDTd2TD1gpaLn9t'))
+let PoolAddress = Address(base58'3PNfEcECsaLXFcSLcf6bTxyZ5XLHLpisNFg')
+let market = Address(base58'3P8Df2b7ywHtLBHBe8PBVQYd3A5MdEEJAou')
+let supplyTokenStr = "WAVES"
+let supplyToken = unit
+let supplyTokenScale = 100000000
+let borrowTokenStr = "AP4Cb5xLYGH6ZigHreCZHoXpQTWDkPsG2BHqfDUx6taJ"
+let borrowToken = base58'AP4Cb5xLYGH6ZigHreCZHoXpQTWDkPsG2BHqfDUx6taJ'
+let borrowTokenScale = 1000000
+
+func getAssetString(assetId: ByteVector|Unit) = {
+  match assetId {
+    case b:ByteVector => b.toBase58String()
+    case _ => "WAVES"
+  }
+}
+
+func getAssetBytes(assetIdStr: String) = {
+  if (assetIdStr == "WAVES") then {unit} else {assetIdStr.fromBase58String()}
+}
+
+func getRates() = {
+  strict rates = invoke(market, "calculateTokenRates", [false], [])
+  rates.exactAs[String]
+}
+
+func getRate(rates: String, assetStr: String, rateType: String) = {
+  strict rateNum = if rateType == "bRate" then 0 else 1
+  strict assetNum = getStringValue(market, "setup_tokens").split(",").indexOf(assetStr).value()
+  rates.split(",")[assetNum].value().split("|")[rateNum].parseIntValue()
+}
+
+func getCurrentSupply(address: String, rates: String) = {
+  strict supply = getIntegerValue(market, address+"_supplied_"+supplyTokenStr)
+  strict rate = getRate(rates, supplyTokenStr, "sRate")
+  fraction(supply, rate, Scale16)
+}
+
+func getCurrentBorrow(address: String, rates: String) = {
+  strict borrow = getIntegerValue(market, address+"_borrowed_"+borrowTokenStr)
+  strict rate = getRate(rates, borrowTokenStr, "bRate")
+  fraction(borrow, rate, Scale16)
+}
+
+@Callable(i)
+func longStatsJson(address: String, debug: Boolean) = {
+  let lpQuantity = assetInfo(getStringValue(address.addressFromStringValue(), "setup_lpid").fromBase58String()).value().quantity
+  let rates = getRates()
+  let supplied = getCurrentSupply(address, rates)
+  let borrowed = getCurrentBorrow(address, rates)
+  let sAssetPrice = getIntegerValue(OracleAddress, supplyTokenStr+"_twap5B")
+  let suppliedUsd = fraction(supplied, sAssetPrice, supplyTokenScale)
+  let borrowedUsd = borrowed
+
+  let positionCap = suppliedUsd-borrowedUsd
+  let leverage = fraction(suppliedUsd, 1000000, positionCap)
+  let lpPriceInUsd = fraction(positionCap, 100000000, lpQuantity)
+  let lpPriceInAsset = fraction(lpPriceInUsd, supplyTokenScale, sAssetPrice)
+
+  let suppliedStr = supplied.toString()
+  let borrowedStr = borrowed.toString()
+  let leverageStr = leverage.toString()
+  let lpPriceInUsdStr = lpPriceInUsd.toString()
+  let lpPriceInAssetStr = lpPriceInAsset.toString()
+
+  let str = "{"
+          + "current: {"
+            + "priceUsd: " + lpPriceInUsdStr + ","
+            + "priceAsset: " + lpPriceInAssetStr + ","
+            + "leverage: " + leverageStr + ","
+            + "supplied: " + suppliedStr + ","
+            + "borrowed: " + borrowedStr + ","
+            + "liqPrice: 0"
+          + "}"
+          + "initial: {"
+          + "}"
+  + "}"
+
+  throw(str)
+}
