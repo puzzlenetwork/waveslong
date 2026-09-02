@@ -2,7 +2,7 @@
 {-# CONTENT_TYPE DAPP #-}
 {-# SCRIPT_TYPE ACCOUNT #-}
 
-let VERSION = "Long-0.0.2"
+let VERSION = "Long-0.1.5"
 
 let Scale16 = 10000000000000000
 let Scale8 = 100000000
@@ -85,7 +85,8 @@ func init(toBorrow: Int) = {
     [
       StringEntry("setup_lpid", issue.calculateAssetId().getAssetString()),
       issue,
-      ScriptTransfer(i.caller, pmt.amount, issue.calculateAssetId())
+      ScriptTransfer(i.caller, pmt.amount, issue.calculateAssetId()),
+      ScriptTransfer(i.caller, toBorrow, borrowToken)
     ]
   }
 }
@@ -105,17 +106,18 @@ func mintWithLeverage(minPrice: Int, readOnly: Boolean) = {
   let positionUsd = fraction(positionSupply, sAssetPrice, supplyTokenScale) - positionBorrow
 
   let shareInPosition = fraction(pmtUsd, Scale8, positionUsd)
-  let usdToBorrowWithoutSlippage = fraction(shareInPosition, Scale8, positionBorrow)
+  let usdToBorrowWithoutSlippage = fraction(shareInPosition, positionBorrow, Scale8)
   let priceWithSlippage = calcRealPrice(usdToBorrowWithoutSlippage)
 
   strict priceCheck = if (priceWithSlippage < minPrice) then {throw("leverage price is less than minPrice -> try smaller amount")} else true
 
   # non-priority TODO: this is a rough calculation, ideally to calc perfect amount of usdToBorrow based on slippage curve
   let toBorrow = fraction(usdToBorrowWithoutSlippage, priceWithSlippage, sAssetPrice)
+  # throw(shareInPosition.toString() + " , " + usdToBorrowWithoutSlippage.toString() + " , " + priceWithSlippage.toString() + " , " + toBorrow.toString())
 
   strict supBalBefore1 = getBalance(supplyTokenStr)
   strict inv1 = invoke(market, "supply", [], [i.payments[0]])
-  strict suppliedFirst = getBalance(supplyTokenStr) - supBalBefore1
+  strict suppliedFirst = supBalBefore1 - getBalance(supplyTokenStr)
   strict borBalBefore = getBalance(borrowTokenStr)
   strict inv2 = invoke(market, "borrow", [borrowTokenStr, toBorrow], [])
   strict borrowedAmount = getBalance(borrowTokenStr) - borBalBefore
@@ -124,9 +126,12 @@ func mintWithLeverage(minPrice: Int, readOnly: Boolean) = {
   strict boughtAmount = getBalance(supplyTokenStr) - supBalBefore2
 
   # add to supply = borrowedAmount / borSupRatio - suppliedFirst
-  let toSupply = fraction(borrowedAmount, Scale8, borSupRatio)
+  let toSupply = fraction(borrowedAmount, supplyTokenScale, borSupRatio)
   let addToSupply = toSupply - suppliedFirst
   let sendBack = boughtAmount - addToSupply
+
+  # throw(borrowedAmount.toString() + " , " + toSupply.toString() + " , " + suppliedFirst.toString() + " , " + boughtAmount.toString())
+
   strict inv4 = invoke(market, "supply", [], [AttachedPayment(supplyToken, addToSupply)])
 
   strict enoughSwappedCheck = if (sendBack < 0) then {throw("something went wrong while leverage calculation -> use other minting options")} else true
