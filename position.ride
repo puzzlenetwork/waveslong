@@ -2,7 +2,7 @@
 {-# CONTENT_TYPE DAPP #-}
 {-# SCRIPT_TYPE ACCOUNT #-}
 
-let VERSION = "Long-0.2.0"
+let VERSION = "Long-0.2.2"
 
 let Scale16 = 10000000000000000
 let Scale8 = 100000000
@@ -74,8 +74,8 @@ func calcLiquidationPrice(supplied: Int, borrowed: Int) = {
   let cf = getStringValue(market, "setup_ltvs").split(",")[sTokenNum].value().parseIntValue()
   let lt = getStringValue(market, "setup_lts").split(",")[bTokenNum].value().parseIntValue()
 
-  let syppliedWithCf = fraction(supplied, cf, 10000)
-  let borowedWithLt = fraction(borrowed, 10000, lt)
+  let syppliedWithCf = fraction(supplied, cf, Scale8)
+  let borowedWithLt = fraction(borrowed, Scale8, lt)
 
   let liqPrice = fraction(borowedWithLt, supplyTokenScale, syppliedWithCf)
   liqPrice
@@ -135,17 +135,17 @@ func mintV1(readOnly: Boolean) = {
   let borSupRatio = fraction(Scale8, positionBorrow, positionSupply)
   let positionUsd = fraction(positionSupply, sAssetPrice, supplyTokenScale) - positionBorrow
 
-  let shareInPosition = fraction(pmt.amount, Scale8, positionSupply)
+  strict shareInPosition = fraction(pmt.amount, Scale8, positionSupply, FLOOR)
   let toSupply = pmt.amount
-  let toBorrow = fraction(positionBorrow, shareInPosition, Scale8)
+  strict toBorrow = fraction(positionBorrow, shareInPosition, Scale8)
 
   # TODO: verify market roundings don't screw this
-  strict inv1 = invoke(market, "supply", [borrowTokenStr, toSupply], [])
+  strict inv1 = invoke(market, "supply", [], [pmt])
   strict borBalBefore = getBalance(borrowTokenStr)
   strict inv2 = invoke(market, "borrow", [borrowTokenStr, toBorrow], [])
   strict borrowedAmount = getBalance(borrowTokenStr) - borBalBefore
 
-  let lpAmount = fraction(assetInfo(lpId).value().quantity, toSupply, positionSupply)
+  let lpAmount = fraction(assetInfo(lpId).value().quantity, toSupply, positionSupply, FLOOR)
   if (readOnly) then {throw("minted: " + lpAmount.toString() + " LONG, sent back: " + toBorrow.toString() + " ROME")}
   else {
     [
@@ -199,24 +199,24 @@ func mintV2(minPrice: Int, readOnly: Boolean) = {
   let addToSupply = toSupply - suppliedFirst
   let sendBack = boughtAmount - addToSupply
 
-  # throw(borrowedAmount.toString() + " , " + toSupply.toString() + " , " + suppliedFirst.toString() + " , " + boughtAmount.toString())
+  throw(borrowedAmount.toString() + " , " + toSupply.toString() + " , " + suppliedFirst.toString() + " , " + boughtAmount.toString() + " , " + (suppliedFirst+boughtAmount).toString())
 
-  strict inv4 = invoke(market, "supply", [], [AttachedPayment(supplyToken, addToSupply)])
+  # strict inv4 = invoke(market, "supply", [], [AttachedPayment(supplyToken, addToSupply)])
 
-  strict enoughSwappedCheck = if (sendBack < 0) then {throw("something went wrong while leverage calculation -> use other minting options")} else true
+  # strict enoughSwappedCheck = if (sendBack < 0) then {throw("something went wrong while leverage calculation -> use other minting options")} else true
 
-  # TODO: final checks that borrow and supply of position increased proportionally
+  # # TODO: final checks that borrow and supply of position increased proportionally
 
-  let lpAmount = fraction(assetInfo(lpId).value().quantity, toSupply, positionSupply)
+  # let lpAmount = fraction(assetInfo(lpId).value().quantity, toSupply, positionSupply)
 
-  if (readOnly) then {throw("minted: " + lpAmount.toString() + " LONG, sent back: " + sendBack.toString() + " WAVES")}
-  else {
-    [
-      Reissue(lpId, lpAmount, true),
-      ScriptTransfer(i.caller, lpAmount, lpId),
-      ScriptTransfer(i.caller, sendBack, supplyToken)
-    ]
-  }
+  # if (readOnly) then {throw("minted: " + lpAmount.toString() + " LONG, sent back: " + sendBack.toString() + " WAVES")}
+  # else {
+  #   [
+  #     Reissue(lpId, lpAmount, true),
+  #     ScriptTransfer(i.caller, lpAmount, lpId),
+  #     ScriptTransfer(i.caller, sendBack, supplyToken)
+  #   ]
+  # }
 }
 
 @Callable(i)
@@ -236,12 +236,12 @@ func redeemV1() = {
     let wavesAmount = fraction(pmt1.amount, supply, lpQuantity)
 
     let shallBeRepaid = fraction(wavesAmount, borrow, supply)
-    let repayReturn = min([shallBeRepaid, pmt2.amount])
+    let actualRepay = min([shallBeRepaid, pmt2.amount])
 
-    let usedLP = fraction(repayReturn, supply, borrow)
-    let usedRepay = pmt2.amount - repayReturn
+    let usedLP = fraction(actualRepay, supply, borrow)
+    let repayReturn = pmt2.amount - actualRepay
 
-    strict inv1 = invoke(market, "repay", [], [AttachedPayment(borrowTokenStr.getAssetBytes(), usedRepay)])
+    strict inv1 = invoke(market, "repay", [], [AttachedPayment(borrowTokenStr.getAssetBytes(), actualRepay)])
     strict inv2 = invoke(market, "withdraw", [supplyTokenStr, usedLP], [])
 
     [
@@ -249,7 +249,7 @@ func redeemV1() = {
 
       ScriptTransfer(i.caller, usedLP - 1, supplyTokenStr.getAssetBytes()),
       ScriptTransfer(i.caller, pmt1.amount - usedLP, lpId),
-      ScriptTransfer(i.caller, pmt2.amount - usedRepay, borrowTokenStr.getAssetBytes())
+      ScriptTransfer(i.caller, repayReturn, borrowTokenStr.getAssetBytes())
     ]
   }
 }
