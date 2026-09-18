@@ -2,7 +2,7 @@
 {-# CONTENT_TYPE DAPP #-}
 {-# SCRIPT_TYPE ACCOUNT #-}
 
-let VERSION = "Long-0.2.2"
+let VERSION = "Long-0.3.0"
 
 let Scale16 = 10000000000000000
 let Scale8 = 100000000
@@ -85,8 +85,8 @@ func calcLiquidationPrice(supplied: Int, borrowed: Int) = {
 
 @Callable(i)
 func init(toBorrow: Int) = {
-  if (i.caller != Address(base58'3P9xX849YJXg7C87v82cDyDy5VhKiPJpHo8')) then {throw("whitelist only")}
-  # if (lpIdStr != "") then {throw("already initialized")}
+  if (i.caller != Address(base58'3P98uYVEj28azbJn7qnmRWjz8DeXMBMDoTk')) then {throw("only invocations through Long Hub are allowed")}
+  else if (lpIdStr != "") then {throw("already initialized")}
   else {
     let pmt = i.payments[0]
     strict assetValidity = if (pmt.assetId.getAssetString() != supplyTokenStr) then {throw("wrong asset attached")} else true
@@ -104,8 +104,8 @@ func init(toBorrow: Int) = {
     [
       StringEntry("setup_lpid", issue.calculateAssetId().getAssetString()),
       issue,
-      ScriptTransfer(i.caller, pmt.amount, issue.calculateAssetId()),
-      ScriptTransfer(i.caller, toBorrow, borrowToken),
+      ScriptTransfer(i.originCaller, pmt.amount, issue.calculateAssetId()),
+      ScriptTransfer(i.originCaller, toBorrow, borrowToken),
 
       StringEntry("stats_initialSetup", pmt.amount.toString() + "," + 
                                          toBorrow.toString() + "," + 
@@ -199,24 +199,24 @@ func mintV2(minPrice: Int, readOnly: Boolean) = {
   let addToSupply = toSupply - suppliedFirst
   let sendBack = boughtAmount - addToSupply
 
-  throw(borrowedAmount.toString() + " , " + toSupply.toString() + " , " + suppliedFirst.toString() + " , " + boughtAmount.toString() + " , " + (suppliedFirst+boughtAmount).toString())
+  # throw(borrowedAmount.toString() + " , " + toSupply.toString() + " , " + suppliedFirst.toString() + " , " + boughtAmount.toString() + " , " + (suppliedFirst+boughtAmount).toString())
 
-  # strict inv4 = invoke(market, "supply", [], [AttachedPayment(supplyToken, addToSupply)])
+  strict inv4 = invoke(market, "supply", [], [AttachedPayment(supplyToken, addToSupply)])
 
-  # strict enoughSwappedCheck = if (sendBack < 0) then {throw("something went wrong while leverage calculation -> use other minting options")} else true
+  strict enoughSwappedCheck = if (sendBack < 0) then {throw("something went wrong while leverage calculation -> use other minting options")} else true
 
-  # # TODO: final checks that borrow and supply of position increased proportionally
+  # TODO: final checks that borrow and supply of position increased proportionally
 
-  # let lpAmount = fraction(assetInfo(lpId).value().quantity, toSupply, positionSupply)
+  let lpAmount = fraction(assetInfo(lpId).value().quantity, toSupply, positionSupply)
 
-  # if (readOnly) then {throw("minted: " + lpAmount.toString() + " LONG, sent back: " + sendBack.toString() + " WAVES")}
-  # else {
-  #   [
-  #     Reissue(lpId, lpAmount, true),
-  #     ScriptTransfer(i.caller, lpAmount, lpId),
-  #     ScriptTransfer(i.caller, sendBack, supplyToken)
-  #   ]
-  # }
+  if (readOnly) then {throw("minted: " + lpAmount.toString() + " LONG, sent back: " + sendBack.toString() + " WAVES")}
+  else {
+    [
+      Reissue(lpId, lpAmount, true),
+      ScriptTransfer(i.caller, lpAmount, lpId),
+      ScriptTransfer(i.caller, sendBack, supplyToken)
+    ]
+  }
 }
 
 @Callable(i)
