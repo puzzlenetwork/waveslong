@@ -2,7 +2,7 @@
 {-# CONTENT_TYPE DAPP #-}
 {-# SCRIPT_TYPE ACCOUNT #-}
 
-let VERSION = "LongHub-0.1.0"
+let VERSION = "LongHub-0.4.0"
 
 let Scale16 = 10000000000000000
 let Scale8 = 100000000
@@ -51,6 +51,48 @@ func getCurrentBorrow(address: String, rates: String) = {
   fraction(borrow, rate, Scale16)
 }
 
+func calcLiquidationPrice(supplied: Int, borrowed: Int) = {
+  let sTokenNum = getStringValue(market, "setup_tokens").split(",").indexOf(supplyTokenStr).value()
+  let bTokenNum = getStringValue(market, "setup_tokens").split(",").indexOf(borrowTokenStr).value()
+  let cf = getStringValue(market, "setup_ltvs").split(",")[sTokenNum].value().parseIntValue()
+  let lt = getStringValue(market, "setup_lts").split(",")[bTokenNum].value().parseIntValue()
+
+  let syppliedWithCf = fraction(supplied, cf, Scale8)
+  let borowedWithLt = fraction(borrowed, Scale8, lt)
+
+  let liqPrice = fraction(borowedWithLt, supplyTokenScale, syppliedWithCf)
+  liqPrice
+}
+
+@Callable(i)
+func createNew(toBorrow: Int) = {
+  let emptyContracts = getStringValue("global_emptyContracts").split_4C(",")
+  let newEmptyContracts = emptyContracts.removeByIndex(0).makeString_2C(",")
+  let contract = emptyContracts[0]
+  let contractAddress = contract.addressFromStringValue()
+
+  strict inv = invoke(contractAddress, "init", [toBorrow], i.payments)
+
+  [
+    # TODO: dynamic page chose
+    StringEntry("global_longsList_1", getStringValue("global_longsList_1") + "," + contract)
+  ]
+}
+
+@Callable(i)
+func allStatsJson(page: Int, debug: Boolean) = {
+  let li = getStringValue("global_longsList_"+page.toString()).split_4C(",")
+
+  func f(accum: String, next: String) = {
+    strict res = invoke(this, "longStatsJson", [next, false], []).exactAs[String]
+    accum + res + ", "
+  }
+
+  let str = "[" + (FOLD<64>(li, "", f)).dropRight(2) + "]"
+
+  if debug then throw(str) else ([], str)
+}
+
 @Callable(i)
 func longStatsJson(address: String, debug: Boolean) = {
   let lpQuantity = assetInfo(getStringValue(address.addressFromStringValue(), "setup_lpid").fromBase58String()).value().quantity
@@ -72,18 +114,32 @@ func longStatsJson(address: String, debug: Boolean) = {
   let lpPriceInUsdStr = lpPriceInUsd.toString()
   let lpPriceInAssetStr = lpPriceInAsset.toString()
 
-  let str = "{"
-          + "current: {"
-            + "priceUsd: " + lpPriceInUsdStr + ","
-            + "priceAsset: " + lpPriceInAssetStr + ","
-            + "leverage: " + leverageStr + ","
-            + "supplied: " + suppliedStr + ","
-            + "borrowed: " + borrowedStr + ","
-            + "liqPrice: 0"
-          + "}"
-          + "initial: {"
-          + "}"
+  let initialSetup = getStringValue(address.addressFromStringValue(), "stats_initialSetup").split(",")
+  let initialQuantity = initialSetup[0].parseIntValue()
+  let initialSuppliedUsd = fraction(initialSetup[0].parseIntValue(), initialSetup[2].parseIntValue(), supplyTokenScale)
+  let initialPositionCap = initialSuppliedUsd-initialSetup[1].parseIntValue()
+  let initialPrice = fraction(initialPositionCap, supplyTokenScale, initialQuantity)
+  let initialPriceInAsset = fraction(initialSetup[1].parseIntValue(), supplyTokenScale, initialSetup[2].parseIntValue())
+  let initialLeverage = fraction(initialSuppliedUsd, 1000000, initialPositionCap)
+
+  let str = "\n{\n"
+          + " \"current\": { "
+            + "\"priceUsd\": " + lpPriceInUsdStr + ", "
+            + "\"priceAsset\": " + lpPriceInAssetStr + ", "
+            + "\"leverage\": " + leverageStr + ", "
+            + "\"supplied\": " + suppliedStr + ", "
+            + "\"borrowed\": " + borrowedStr + ", "
+            + "\"liqPrice\": " + calcLiquidationPrice(supplied, borrowed).toString() + " "
+          + "\n},"
+          + " \"initial\": { "
+            + "\"priceUsd\": " + initialPrice.toString() + ", "
+            + "\"priceAsset\": " + initialPriceInAsset.toString() + ", "
+            + "\"leverage\": " + initialLeverage.toString() + ", "
+            + "\"supplied\": " + initialSetup[0] + ", "
+            + "\"borrowed\": " + initialSetup[1] + ", "
+            + "\"liqPrice\": " + initialSetup[3] + " "
+          + "\n}"
   + "}"
 
-  throw(str)
+  if debug then throw(str) else ([], str)
 }
