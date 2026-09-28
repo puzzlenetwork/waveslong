@@ -2,8 +2,7 @@
 {-# CONTENT_TYPE DAPP #-}
 {-# SCRIPT_TYPE ACCOUNT #-}
 
-let VERSION = "Long-0.3.1"
-let CONTRACT_TYPE = "LONG"
+let VERSION = "LongHub-0.4.0"
 
 let Scale16 = 10000000000000000
 let Scale8 = 100000000
@@ -17,8 +16,6 @@ let supplyTokenScale = 100000000
 let borrowTokenStr = "AP4Cb5xLYGH6ZigHreCZHoXpQTWDkPsG2BHqfDUx6taJ"
 let borrowToken = base58'AP4Cb5xLYGH6ZigHreCZHoXpQTWDkPsG2BHqfDUx6taJ'
 let borrowTokenScale = 1000000
-let lpIdStr = getString(this, "setup_lpid").valueOrElse("")
-let lpId = lpIdStr.fromBase58String()
 
 func getAssetString(assetId: ByteVector|Unit) = {
   match assetId {
@@ -42,31 +39,16 @@ func getRate(rates: String, assetStr: String, rateType: String) = {
   rates.split(",")[assetNum].value().split("|")[rateNum].parseIntValue()
 }
 
-func getCurrentSupply(rates: String) = {
-  strict supply = getIntegerValue(market, this.toString()+"_supplied_"+supplyTokenStr)
+func getCurrentSupply(address: String, rates: String) = {
+  strict supply = getIntegerValue(market, address+"_supplied_"+supplyTokenStr)
   strict rate = getRate(rates, supplyTokenStr, "sRate")
   fraction(supply, rate, Scale16)
 }
 
-func getCurrentBorrow(rates: String) = {
-  strict borrow = getIntegerValue(market, this.toString()+"_borrowed_"+borrowTokenStr)
+func getCurrentBorrow(address: String, rates: String) = {
+  strict borrow = getIntegerValue(market, address+"_borrowed_"+borrowTokenStr)
   strict rate = getRate(rates, borrowTokenStr, "bRate")
   fraction(borrow, rate, Scale16)
-}
-
-func getBalance(assetIdStr: String) = {
-  if (assetIdStr == "WAVES") then {wavesBalance(this).available} else {assetBalance(this, assetIdStr.fromBase58String())}
-}
-
-## actions
-
-func swapBorrowed(borrowedAmount: Int) = {
-  invoke(PoolAddress, "swap", [supplyTokenStr, 0], [AttachedPayment(borrowToken, borrowedAmount)])
-}
-
-func calcRealPrice(amountIn: Int) = {
-  strict amountOut = invoke(PoolAddress, "swapReadOnly", [borrowTokenStr, supplyTokenStr, amountIn], []).exactAs[Int]
-  fraction(amountIn, supplyTokenScale, amountOut)
 }
 
 func calcLiquidationPrice(supplied: Int, borrowed: Int) = {
@@ -82,201 +64,82 @@ func calcLiquidationPrice(supplied: Int, borrowed: Int) = {
   liqPrice
 }
 
-## callables
-
 @Callable(i)
-func init(toBorrow: Int) = {
-  if (i.caller != Address(base58'3P98uYVEj28azbJn7qnmRWjz8DeXMBMDoTk')) then {throw("only invocations through Long Hub are allowed")}
-  else if (lpIdStr != "") then {throw("already initialized")}
-  else {
-    let pmt = i.payments[0]
-    strict assetValidity = if (pmt.assetId.getAssetString() != supplyTokenStr) then {throw("wrong asset attached")} else true
+func createNew(toBorrow: Int) = {
+  let emptyContracts = getStringValue("global_emptyContracts").split_4C(",")
+  let newEmptyContracts = emptyContracts.removeByIndex(0).makeString_2C(",")
+  let contract = emptyContracts[0]
+  let contractAddress = contract.addressFromStringValue()
 
-    strict supply = invoke(market, "supply", [], [pmt])
-    strict borrow = invoke(market, "borrow", [borrowTokenStr, toBorrow], [])
+  strict inv = invoke(contractAddress, "init", [toBorrow], i.payments)
 
-    let sAssetPrice = getIntegerValue(OracleAddress, supplyTokenStr+"_twap5B")
-    let positionUsd = fraction(pmt.amount, sAssetPrice, supplyTokenScale) - toBorrow
-    let liquidationPrice = calcLiquidationPrice(pmt.amount, toBorrow)
-    let liquidationPriceFormatted = toString(liquidationPrice / 100)
-
-    let issue = Issue("#WAVESLONG-"+liquidationPriceFormatted, "#WAVESLONG"+liquidationPriceFormatted, pmt.amount, 8, true)
-
-    [
-      StringEntry("setup_lpid", issue.calculateAssetId().getAssetString()),
-      issue,
-      ScriptTransfer(i.originCaller, pmt.amount, issue.calculateAssetId()),
-      ScriptTransfer(i.originCaller, toBorrow, borrowToken),
-
-      StringEntry("stats_initialSetup", pmt.amount.toString() + "," + 
-                                         toBorrow.toString() + "," + 
-                                         sAssetPrice.toString() + "," + 
-                                         liquidationPrice.toString() + "," + 
-                                         positionUsd.toString() + ","
-                                        )
-
-    ]
-  }
+  [
+    # TODO: dynamic page chose
+    StringEntry("global_longsList_1", getStringValue("global_longsList_1") + "," + contract)
+  ]
 }
 
 @Callable(i)
-func mintV1(readOnly: Boolean) = {
-  # mints WAVESLONG equal to attached WAVES and sends back borrowed ROME
-  # does NOT leverage automatically
+func allStatsJson(page: Int, debug: Boolean) = {
+  let li = getStringValue("global_longsList_"+page.toString()).split_4C(",")
 
-  let pmt = i.payments[0]
+  func f(accum: String, next: String) = {
+    strict res = invoke(this, "longStatsJson", [next, false], []).exactAs[String]
+    accum + res + ", "
+  }
 
-  strict assetValidity = if (pmt.assetId.getAssetString() != supplyTokenStr) then {throw("wrong asset attached")} else true
+  let str = "[" + (FOLD<64>(li, "", f)).dropRight(2) + "]"
 
+  if debug then throw(str) else ([], str)
+}
+
+@Callable(i)
+func longStatsJson(address: String, debug: Boolean) = {
+  let lpQuantity = assetInfo(getStringValue(address.addressFromStringValue(), "setup_lpid").fromBase58String()).value().quantity
+  let rates = getRates()
+  let supplied = getCurrentSupply(address, rates)
+  let borrowed = getCurrentBorrow(address, rates)
   let sAssetPrice = getIntegerValue(OracleAddress, supplyTokenStr+"_twap5B")
-  let pmtUsd = fraction(pmt.amount, sAssetPrice, supplyTokenScale)
-  let marketRates = getRates()
-  let positionSupply = getCurrentSupply(marketRates)
-  let positionBorrow = getCurrentBorrow(marketRates)
-  let borSupRatio = fraction(Scale8, positionBorrow, positionSupply)
-  let positionUsd = fraction(positionSupply, sAssetPrice, supplyTokenScale) - positionBorrow
+  let suppliedUsd = fraction(supplied, sAssetPrice, supplyTokenScale)
+  let borrowedUsd = borrowed
 
-  strict shareInPosition = fraction(pmt.amount, Scale8, positionSupply, FLOOR)
-  let toSupply = pmt.amount
-  strict toBorrow = fraction(positionBorrow, shareInPosition, Scale8)
+  let positionCap = suppliedUsd-borrowedUsd
+  let leverage = fraction(suppliedUsd, 1000000, positionCap)
+  let lpPriceInUsd = fraction(positionCap, 100000000, lpQuantity)
+  let lpPriceInAsset = fraction(lpPriceInUsd, supplyTokenScale, sAssetPrice)
 
-  # TODO: verify market roundings don't screw this
-  strict inv1 = invoke(market, "supply", [], [pmt])
-  strict borBalBefore = getBalance(borrowTokenStr)
-  strict inv2 = invoke(market, "borrow", [borrowTokenStr, toBorrow], [])
-  strict borrowedAmount = getBalance(borrowTokenStr) - borBalBefore
+  let suppliedStr = supplied.toString()
+  let borrowedStr = borrowed.toString()
+  let leverageStr = leverage.toString()
+  let lpPriceInUsdStr = lpPriceInUsd.toString()
+  let lpPriceInAssetStr = lpPriceInAsset.toString()
 
-  let lpAmount = fraction(assetInfo(lpId).value().quantity, toSupply, positionSupply, FLOOR)
-  if (readOnly) then {throw("minted: " + lpAmount.toString() + " LONG, sent back: " + toBorrow.toString() + " ROME")}
-  else {
-    [
-      Reissue(lpId, lpAmount, true),
-      ScriptTransfer(i.caller, lpAmount, lpId),
-      ScriptTransfer(i.caller, toBorrow, borrowToken)
-    ]
-  }
-}
+  let initialSetup = getStringValue(address.addressFromStringValue(), "stats_initialSetup").split(",")
+  let initialQuantity = initialSetup[0].parseIntValue()
+  let initialSuppliedUsd = fraction(initialSetup[0].parseIntValue(), initialSetup[2].parseIntValue(), supplyTokenScale)
+  let initialPositionCap = initialSuppliedUsd-initialSetup[1].parseIntValue()
+  let initialPrice = fraction(initialPositionCap, supplyTokenScale, initialQuantity)
+  let initialPriceInAsset = fraction(initialSetup[1].parseIntValue(), supplyTokenScale, initialSetup[2].parseIntValue())
+  let initialLeverage = fraction(initialSuppliedUsd, 1000000, initialPositionCap)
 
-@Callable(i)
-func mintV2(minPrice: Int, readOnly: Boolean) = {
-  # mints WAVESLONG with leverage
-  # UNSUITABLE for large positions due to slippage
-  # usually has some leftover of WAVES due to roundings to send back
+  let str = "\n{\n"
+          + " \"current\": { "
+            + "\"priceUsd\": " + lpPriceInUsdStr + ", "
+            + "\"priceAsset\": " + lpPriceInAssetStr + ", "
+            + "\"leverage\": " + leverageStr + ", "
+            + "\"supplied\": " + suppliedStr + ", "
+            + "\"borrowed\": " + borrowedStr + ", "
+            + "\"liqPrice\": " + calcLiquidationPrice(supplied, borrowed).toString() + " "
+          + "\n},"
+          + " \"initial\": { "
+            + "\"priceUsd\": " + initialPrice.toString() + ", "
+            + "\"priceAsset\": " + initialPriceInAsset.toString() + ", "
+            + "\"leverage\": " + initialLeverage.toString() + ", "
+            + "\"supplied\": " + initialSetup[0] + ", "
+            + "\"borrowed\": " + initialSetup[1] + ", "
+            + "\"liqPrice\": " + initialSetup[3] + " "
+          + "\n}"
+  + "}"
 
-  let pmt = i.payments[0]
-
-  strict assetValidity = if (pmt.assetId.getAssetString() != supplyTokenStr) then {throw("wrong asset attached")} else true
-
-  let sAssetPrice = getIntegerValue(OracleAddress, supplyTokenStr+"_twap5B")
-  let pmtUsd = fraction(pmt.amount, sAssetPrice, supplyTokenScale)
-  let marketRates = getRates()
-  let positionSupply = getCurrentSupply(marketRates)
-  let positionBorrow = getCurrentBorrow(marketRates)
-  let borSupRatio = fraction(Scale8, positionBorrow, positionSupply)
-  let positionUsd = fraction(positionSupply, sAssetPrice, supplyTokenScale) - positionBorrow
-
-  let shareInPosition = fraction(pmtUsd, Scale8, positionUsd)
-  let usdToBorrowWithoutSlippage = fraction(shareInPosition, positionBorrow, Scale8)
-  let priceWithSlippage = calcRealPrice(usdToBorrowWithoutSlippage)
-
-  strict priceCheck = if (priceWithSlippage < minPrice) then {throw("leverage price is less than minPrice -> try smaller amount")} else true
-
-  # non-priority TODO: this is a rough calculation, ideally to calc perfect amount of usdToBorrow based on slippage curve
-  let toBorrow = fraction(usdToBorrowWithoutSlippage, priceWithSlippage, sAssetPrice)
-  # throw(shareInPosition.toString() + " , " + usdToBorrowWithoutSlippage.toString() + " , " + priceWithSlippage.toString() + " , " + toBorrow.toString())
-
-  strict supBalBefore1 = getBalance(supplyTokenStr)
-  strict inv1 = invoke(market, "supply", [], [i.payments[0]])
-  strict suppliedFirst = supBalBefore1 - getBalance(supplyTokenStr)
-  strict borBalBefore = getBalance(borrowTokenStr)
-  strict inv2 = invoke(market, "borrow", [borrowTokenStr, toBorrow], [])
-  strict borrowedAmount = getBalance(borrowTokenStr) - borBalBefore
-  strict supBalBefore2 = getBalance(supplyTokenStr)
-  strict inv3 = swapBorrowed(borrowedAmount)
-  strict boughtAmount = getBalance(supplyTokenStr) - supBalBefore2
-
-  # add to supply = borrowedAmount / borSupRatio - suppliedFirst
-  let toSupply = fraction(borrowedAmount, supplyTokenScale, borSupRatio)
-  let addToSupply = toSupply - suppliedFirst
-  let sendBack = boughtAmount - addToSupply
-
-  # throw(borrowedAmount.toString() + " , " + toSupply.toString() + " , " + suppliedFirst.toString() + " , " + boughtAmount.toString() + " , " + (suppliedFirst+boughtAmount).toString())
-
-  strict inv4 = invoke(market, "supply", [], [AttachedPayment(supplyToken, addToSupply)])
-
-  strict enoughSwappedCheck = if (sendBack < 0) then {throw("something went wrong while leverage calculation -> use other minting options")} else true
-
-  # TODO: final checks that borrow and supply of position increased proportionally
-
-  let lpAmount = fraction(assetInfo(lpId).value().quantity, toSupply, positionSupply)
-
-  if (readOnly) then {throw("minted: " + lpAmount.toString() + " LONG, sent back: " + sendBack.toString() + " WAVES")}
-  else {
-    [
-      Reissue(lpId, lpAmount, true),
-      ScriptTransfer(i.caller, lpAmount, lpId),
-      ScriptTransfer(i.caller, sendBack, supplyToken)
-    ]
-  }
-}
-
-@Callable(i)
-func redeemV1() = {
-  # redeems WAVESLONG+ROME to WAVES
-
-  let pmt1 = i.payments[0].value() # LP
-  let pmt2 = i.payments[1].value() # repay
-
-  if (!(pmt1.assetId == lpId && pmt2.assetId.getAssetString() == borrowTokenStr)) then {throw("attach lp & borrowed tokens as payment")}
-  else {
-    let lpQuantity = assetInfo(lpId).value().quantity
-    strict rates = getRates()
-    strict supply = getCurrentSupply(rates)
-    strict borrow = getCurrentBorrow(rates)
-
-    let wavesAmount = fraction(pmt1.amount, supply, lpQuantity)
-
-    let shallBeRepaid = fraction(wavesAmount, borrow, supply)
-    let actualRepay = min([shallBeRepaid, pmt2.amount])
-
-    let usedLP = fraction(actualRepay, supply, borrow)
-    let repayReturn = pmt2.amount - actualRepay
-
-    strict inv1 = invoke(market, "repay", [], [AttachedPayment(borrowTokenStr.getAssetBytes(), actualRepay)])
-    strict inv2 = invoke(market, "withdraw", [supplyTokenStr, usedLP], [])
-
-    [
-      Burn(lpId, usedLP),
-
-      ScriptTransfer(i.caller, usedLP - 1, supplyTokenStr.getAssetBytes()),
-      ScriptTransfer(i.caller, pmt1.amount - usedLP, lpId),
-      ScriptTransfer(i.caller, repayReturn, borrowTokenStr.getAssetBytes())
-    ]
-  }
-}
-
-@Verifier(tx)
-func verify() = {
-  let multisigStr = "3P98uYVEj28azbJn7qnmRWjz8DeXMBMDoTk"
-  let multisigAddress = addressFromString(multisigStr)
-
-  match tx {
-    case ttx:SetScriptTransaction => {
-      match ttx.script {
-        case script: ByteVector =>
-          let scriptHasha = blake2b256(script).toBase58String()
-          let validFrom = getInteger(multisigAddress.value(), "script%%" + CONTRACT_TYPE + "%%" + scriptHasha + "%%validFrom").valueOrErrorMessage("validFrom not set")
-          let validTo = getInteger(multisigAddress.value(), "script%%" + CONTRACT_TYPE + "%%" + scriptHasha + "%%validTo").valueOrErrorMessage("validTo not set")
-          height >= validFrom && height <= validTo
-        case _ => false  # Reject SetScript(null) explicitly
-      }
-    }
-    case otx => {
-      let taskId = "tx_" + this.toString() + "_" + toBase58String(otx.id)
-      let isApproved = getBoolean(multisigAddress.value(), this.toString() + "_" + toBase58String(otx.id) + "__approved").valueOrElse(false)
-      let approvedFrom = getInteger(multisigAddress.value(), taskId + "__approvedFrom").valueOrElse(0)
-      isApproved && height >= approvedFrom
-    }
-  } 
-
+  if debug then throw(str) else ([], str)
 }
