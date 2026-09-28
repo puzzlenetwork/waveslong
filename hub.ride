@@ -2,7 +2,7 @@
 {-# CONTENT_TYPE DAPP #-}
 {-# SCRIPT_TYPE ACCOUNT #-}
 
-let VERSION = "LongHub-0.4.0"
+let VERSION = "LongHub-0.4.1"
 
 let Scale16 = 10000000000000000
 let Scale8 = 100000000
@@ -75,6 +75,7 @@ func createNew(toBorrow: Int) = {
 
   [
     # TODO: dynamic page chose
+    StringEntry("global_emptyContracts", newEmptyContracts),
     StringEntry("global_longsList_1", getStringValue("global_longsList_1") + "," + contract)
   ]
 }
