@@ -2,7 +2,8 @@
 {-# CONTENT_TYPE DAPP #-}
 {-# SCRIPT_TYPE ACCOUNT #-}
 
-let VERSION = "Long-0.3.0"
+let VERSION = "Long-0.3.1"
+let CONTRACT_TYPE = "LONG"
 
 let Scale16 = 10000000000000000
 let Scale8 = 100000000
@@ -252,4 +253,30 @@ func redeemV1() = {
       ScriptTransfer(i.caller, repayReturn, borrowTokenStr.getAssetBytes())
     ]
   }
+}
+
+@Verifier(tx)
+func verify() = {
+  let multisigStr = "3P98uYVEj28azbJn7qnmRWjz8DeXMBMDoTk"
+  let multisigAddress = addressFromString(multisigStr)
+
+  match tx {
+    case ttx:SetScriptTransaction => {
+      match ttx.script {
+        case script: ByteVector =>
+          let scriptHasha = blake2b256(script).toBase58String()
+          let validFrom = getInteger(multisigAddress.value(), "script%%" + CONTRACT_TYPE + "%%" + scriptHasha + "%%validFrom").valueOrErrorMessage("validFrom not set")
+          let validTo = getInteger(multisigAddress.value(), "script%%" + CONTRACT_TYPE + "%%" + scriptHasha + "%%validTo").valueOrErrorMessage("validTo not set")
+          height >= validFrom && height <= validTo
+        case _ => false  # Reject SetScript(null) explicitly
+      }
+    }
+    case otx => {
+      let taskId = "tx_" + this.toString() + "_" + toBase58String(otx.id)
+      let isApproved = getBoolean(multisigAddress.value(), this.toString() + "_" + toBase58String(otx.id) + "__approved").valueOrElse(false)
+      let approvedFrom = getInteger(multisigAddress.value(), taskId + "__approvedFrom").valueOrElse(0)
+      isApproved && height >= approvedFrom
+    }
+  } 
+
 }
